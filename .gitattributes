@@ -1,0 +1,15 @@
+# Normalize line endings to LF (deployment target is Linux)
+* text=auto eol=lf
+
+*.rs   text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.xml  text eol=lf
+*.proto text eol=lf
+
+# Binary
+*.png  binary
+*.jpg  binary
+*.ico  binary

@@ -1,0 +1,12 @@
+[package]
+name = "msg-account"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "msg_account"
+path = "src/lib.rs"
+
+[dependencies]
+arc-swap = "1"
+crossbeam-channel = "0.5"
