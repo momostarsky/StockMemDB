@@ -1,0 +1,14 @@
+[package]
+name = "msg-transport"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "msg_transport"
+path = "src/lib.rs"
+
+[dependencies]
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+msg-proto = { path = "../msg-proto" }

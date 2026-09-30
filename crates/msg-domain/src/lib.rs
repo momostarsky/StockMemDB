@@ -1896,7 +1896,10 @@ macro_rules! __domain_date_impl {
                 let y = num(parts[0])?;
                 let x = num(parts[1])?;
                 let z = num(parts[2])?;
-                if !(1900..=9999).contains(&y) || x < 1 || x > 99 || z < 1 || z > 99 {
+                if !(1900..=9999).contains(&y)
+                    || !(1..=99).contains(&x)
+                    || !(1..=99).contains(&z)
+                {
                     return ::core::result::Result::Err(err());
                 }
                 let (month, day) = match order {
@@ -2525,6 +2528,9 @@ macro_rules! domain_timestamp {
             }
         }
 
+        // Timestamps are raw i64 microseconds; conversion cannot fail, but
+        // the TryFrom shape is kept for uniformity with the other domain types.
+        #[allow(clippy::infallible_try_from)]
         impl ::core::convert::TryFrom<i64> for $name {
             type Error = ::core::convert::Infallible;
             #[inline]

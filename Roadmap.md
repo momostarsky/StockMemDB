@@ -308,11 +308,12 @@ pub struct TransportInfo {
 - **性能 Spike（目标生产硬件）**：`bench-tcp`（monoio io_uring 收发 pps）+ `bench-wal`（mmap WAL group commit，扫批量 64/256/1024 × fsync 延迟曲线）
 - Spike 结果决定 AF_XDP 优先级
 
-> **M0 进度（截至 2026-09-30，v0.3 回写）**
+> **M0 进度（截至 2026-09-30，v0.3 回写 · msg-transport 完成）**
 > - ? Git 版本管理（main 分支，LF 归一化，.gitignore/.gitattributes）
 > - ? Cargo workspace；msg-proto 协议 v1 落地：48B 帧头 + CRC-32C + TCP 定界 + SBE schema v1（13 测试）
 > - ? 计划外基础组件先行：msg-domain 领域类型体系、msg-account 分片账户（workspace 共 56 测试）
-> - ? 待办：msg-transport（Transport trait + MockTransport）、msg-wal 骨架、bench-tcp/bench-wal（Linux 裸机实测）、proto IDL + 三语言存根、Linux CI
+> - ? msg-transport 落地：Transport trait 契约（Roadmap 6.2 四条纪律：整帧队列 / 显式 release / 批量接口 / 传输自持线程）+ 进程内 MockTransport（真实泵线程、QueueFull 背压回传整帧、入向溢出丢弃 + InboundOverflow 事件、9 项原子指标），Windows/CI 可无网络全链路测试（workspace 共 62 测试）
+> - ? 待办：msg-wal 骨架、bench-tcp/bench-wal（Linux 裸机实测）、proto IDL + 三语言存根、Linux CI
 
 ### M1 — 消息内核（最重要的地基）
 - mmap WAL：segment 管理、group commit、CRC、崩溃恢复（**段记录直存 msg-proto 线路帧字节**，恢复扫描依赖帧头 CRC，见 §3.1）
