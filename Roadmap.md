@@ -2,8 +2,9 @@
 
 | 项目 | 内容 |
 |---|---|
-| 文档版本 | v0.2（草案，待会签） |
+| 文档版本 | v0.3（草案，待会签） |
 | 编写日期 | 2026-08-28 |
+| 更新日期 | 2026-09-30 |
 | 文档状态 | 待评审会签 |
 | 目标平台 | Linux（裸金属优先），Rust 实现 |
 
@@ -49,7 +50,9 @@
 ### 2.1 工程结构（Cargo workspace）
 
 ```
-msg-proto          # 二进制协议 v1 + protobuf IDL（三语言存根生成）
+msg-proto          # 二进制协议 v1（48B 帧头已落地）+ SBE body schema + protobuf IDL
+msg-domain         # 领域守卫类型体系（已落地，v0.3 新增）
+msg-account        # 分片单写者资金/持仓账户（已落地，v0.3 新增基础组件）
 msg-core           # REQ-REP 与 PUB-SUB 语义、monoio 数据面
 msg-filter         # 两级过滤引擎、Schema 属性抽取、WASM 插件宿主（wasmtime）
 msg-wal            # mmap WAL：segment 管理、group commit、CRC、崩溃恢复
@@ -75,6 +78,42 @@ msg-monitor        # WebSocket / Redis Stream / Prometheus 指标
 | 消息模式 | REQ/REP（correlation_id+超时）、PUB/SUB（消费者组+offset 回溯） | 同一套存储内核 |
 | gRPC | tonic + protobuf IDL 单仓 | C#（Grpc.Net）/ Java（grpc-java）存根生成 |
 | FIX | FIX 4.4 网关独立进程（参考 fix-rs / quickfix-rs） | 内部转二进制协议，会话状态不污染核心 |
+| **线路编码（v0.3 决策）** | **定长 48B 帧头 + SBE body**（msg-proto，已落地） | 定长消息零拷贝映射（~ns 级）；gRPC 边界保留 protobuf |
+| **数值类型（v0.3 决策）** | **i64 定点 + 品种级静态 scale**（msg-domain） | 热路径禁用 f64/Decimal；rust_decimal 仅边界层 |
+
+### 3.1 线路编码格式决策（v0.3）
+
+1. **外层帧**：msg-proto 定义 48 字节 packed 小端帧头（magic `MSGX`/version/flags/msg_type/topic_id/schema_id/body_len/CRC-32C/producer_id/seq/correlation_id），对齐为 1，可从 TCP 缓冲区任意偏移解析；CRC 覆盖"CRC 字段清零的头 + body"。
+2. **消息体**：采用 **SBE（FIX Simple Binary Encoding）**，schema 为 `crates/msg-proto/schemas/msgx-v1.xml`（NewOrderSingle / OrderCancelRequest / ExecutionReport），Price/Qty/Money 全部 i64 定点，scale 在品种注册表不进消息。
+3. **分层使用**：热线路 = SBE；gRPC 对外 API = Protobuf/tonic（边界做一次转换）；WAL 段 = 线路字节直存（线路格式即存储格式，恢复时零解析扫描）；最内层私有结构 = `#[repr(C)]`。
+4. **演进纪律**：SBE 字段号永不复用，定长块仅尾部追加且 `sinceVersion` 递增，schemaId/version 进每条消息；codegen（sbe_gen / 官方工具链出 Java/C#）在后续里程碑接线，当前 XML 为规范事实源。
+5. TCP 定界由 `peek_total_len` 完成：半包等待、粘包顺序取帧、流失步（坏 magic/版本）立即报错而非傻等。
+
+### 3.2 领域守卫类型体系（v0.3，msg-domain 已落地）
+
+合法值只在构造时保证：字段私有 newtype，唯一入口 `new()/TryFrom`，**故意不提供 `From<inner>`**；serde 反序列化与 sqlx Decode 均强制走校验（不信任输入方，也不信任 DB 脏数据）；可空性一律外包 `Option<T>`。
+
+| 宏 | 覆盖场景 | 要点 |
+|---|---|---|
+| `domain_int!` | 无限制 / 仅下限 / 仅上限 / 双限制 | PG int2/int4/int8；可选 min/max 分支编译期消失 |
+| `domain_string!` | 仅最大长度 / 必填非空 / 可空+正则任意组合 | 长度按**字符数**对齐 varchar(n)；正则 OnceLock 缓存 |
+| `domain_enum!` | 互斥状态（订单/账户状态） | i32/i64 或 str 载体；未知 code 在边界拒绝；生成业务谓词 `is_xxx()` |
+| `domain_flags!` | 可组合权限（Read=1/Write=2/Delete=4…） | **编译期**锁死 i32/i64 + 位值必须为 2 的幂且不重复；支持 `READ @ 0` 下标语法（1<<k）；运行期拒绝未定义保留位 |
+| `domain_date!` | 20260930 ? 2026-09-30 | i32 存储；真实日历校验（闰年/大小月）；`-`/`/` 分隔；`order = ymd/ydm` 消歧义，默认 YYYYMMDD |
+| `domain_time!` | 120403 ? 12:04:03[.fff/.ffffff] | frac 仅允许 0/3/6；内部标准微秒，毫秒仅留 FIX 边界；超精度拒绝不截断 |
+| `domain_timestamp!` | UTC epoch 时间戳 | unit=millis/micros/nanos，**内部规范值统一 epoch 微秒**；Exchange 与 unit 正交 |
+
+资金纪律：`Money/Price/Qty` 为 i64 定点 newtype，乘法过 i128 中间值，checked 运算溢出报错单；f64 全链路禁用，任何 f64→定点转换视为 bug。交易所常量（SSE/SZSE/HKEX +480、TSE/KRX +540、LSE/NYSE/CME 无固定偏移必须走交易日历）见 `ExchangeConstants.md`。排序时间真相为 `(epoch_us, seq)`；夜盘交易日归属由独立 `SessionCalendar` 处理。
+
+### 3.3 账户模型（v0.3，msg-account 已落地）
+
+资金/持仓账户为"读-判断-改"复合原子操作，采用**按 account_id 分片的单写者（Actor）模型**，不用 arc-swap COW 也不用多原子字段：
+
+1. N 个分片线程（与 monoio thread-per-core 对齐），同一账户命令经有界 MPSC 队列串行 apply；账户内无锁无 CAS，跨账户并行。
+2. 资金不变量 `0 ≤ frozen ≤ cash`；Settle 在一条命令内完成解冻+收付。持仓多空双侧、冻结量、双边加权均价、已实现盈亏；成交先平仓（计盈亏）再开仓（加权均价 i128），拒绝不产生事件、不涨版本。
+3. 每条命令带 `req_id`（u128），有界 FIFO 去重窗口返回首次原始结果——重试与 Raft 重放幂等（M2 幂等去重的账户侧实现，DedupeCache 模式可复用至消息去重）。
+4. 两级读一致性：强一致风控读走命令队列（与写串行，"查可用→冻结"零窗口）；监控走 arc-swap 无锁快照允许陈旧；变更经 `AccountEvent` 事件流推送（WAL/监控数据源，监控积压 try_send 不阻塞账务线程）。
+5. 并发验证：多线程超额冻结请求下成功笔数恰好等于可用额度，无超卖/超冻。跨账户转账留待后续以两阶段命令/本地消息表实现。
 
 ---
 
@@ -269,16 +308,23 @@ pub struct TransportInfo {
 - **性能 Spike（目标生产硬件）**：`bench-tcp`（monoio io_uring 收发 pps）+ `bench-wal`（mmap WAL group commit，扫批量 64/256/1024 × fsync 延迟曲线）
 - Spike 结果决定 AF_XDP 优先级
 
+> **M0 进度（截至 2026-09-30，v0.3 回写）**
+> - ? Git 版本管理（main 分支，LF 归一化，.gitignore/.gitattributes）
+> - ? Cargo workspace；msg-proto 协议 v1 落地：48B 帧头 + CRC-32C + TCP 定界 + SBE schema v1（13 测试）
+> - ? 计划外基础组件先行：msg-domain 领域类型体系、msg-account 分片账户（workspace 共 56 测试）
+> - ? 待办：msg-transport（Transport trait + MockTransport）、msg-wal 骨架、bench-tcp/bench-wal（Linux 裸机实测）、proto IDL + 三语言存根、Linux CI
+
 ### M1 — 消息内核（最重要的地基）
-- mmap WAL：segment 管理、group commit、CRC、崩溃恢复
+- mmap WAL：segment 管理、group commit、CRC、崩溃恢复（**段记录直存 msg-proto 线路帧字节**，恢复扫描依赖帧头 CRC，见 §3.1）
 - 路由引擎：Topic → 订阅者，两级过滤（Header 索引 + schema_id 属性抽取 + CEL 谓词）
 - REQ/REP 与 PUB/SUB 语义（IoUringTcpTransport）
 - 交付：单机压测基线（criterion + bench client）
 
 ### M2 — 可靠性闭环
-- ACK 语义（leader/quorum）、消费 offset 管理、幂等去重窗口
+- ACK 语义（leader/quorum）、消费 offset 管理、幂等去重窗口（复用 msg-account DedupeCache 模式；线上去重键为 msg-proto 的 `MessageId(producer_id, seq)`）
 - 重试队列：指数退避、max_attempts、TTL deadline、DLQ + 死信查询
 - 磁盘满/校验错等故障路径 + 混沌测试
+- 账户侧接线：msg-account 命令事件入 WAL，quorum ACK 后回应客户端（崩溃重放重建资金/持仓）
 
 ### M3 — 对外接入层
 - gRPC（tonic）：生产/消费/管理三类接口；C# 与 Java SDK 跑通
@@ -330,7 +376,7 @@ pub struct TransportInfo {
 
 ## 11. 会签
 
-> 本文档为 v0.2 草案。会签通过后进入 M0 实施；对 §5 过滤插件契约、§6 传输层契约、§9 里程碑顺序、§7 性能结论的任何修改需更新版本号并重新会签。
+> 本文档为 v0.3 草案。会签通过后进入 M0 剩余项 / M1 实施；对 §3.1 线路编码、§3.2 领域类型、§3.3 账户模型、§5 过滤插件契约、§6 传输层契约、§9 里程碑顺序、§7 性能结论的任何修改需更新版本号并重新会签。
 
 ### 11.1 待确认事项（会签前请逐项确认）
 
@@ -363,3 +409,4 @@ pub struct TransportInfo {
 |---|---|---|---|
 | v0.1 | 2026-08-28 | 初稿：技术路线、Transport 契约、里程碑、风险清单 | |
 | v0.2 | 2026-08-28 | 新增 §5 过滤引擎与插件体系（两级过滤、WASM 契约、失败语义、M5.5）；章节重编号；风险清单补插件项 | |
+| v0.3 | 2026-09-30 | 回写已落地决策：§3 选型表补线路编码（48B 帧头+SBE）与 i64 定点数值；新增 §3.1 线路编码（msg-proto 已落地）、§3.2 领域守卫类型体系（msg-domain 七个宏已落地）、§3.3 分片单写者账户模型（msg-account 已落地）；§2.1 工程结构补三 crate；§9 M0 进度与 M1/M2 交叉引用（WAL 直存线路帧、MessageId 去重、账户事件入 WAL） | |
