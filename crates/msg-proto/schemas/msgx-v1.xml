@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  brsk-msgx SBE schema v1 (FIX Simple Binary Encoding).
+
+  This file is the single source of truth for message BODY layouts carried
+  inside msg-proto frames (the 48-byte FrameHeader is defined separately in
+  Rust and wraps every SBE message).
+
+  Conventions:
+  - All money / price / quantity fields are SIGNED FIXED-POINT INTEGERS.
+    Scales are NOT carried per message; they live in the instrument registry
+    (e.g. CNY money scale = 100 cents; futures price scale = 1e8).
+  - Little-endian, matching the frame header.
+  - Evolution rules: field ids are never reused; new fixed fields are only
+    appended to the end of a block with sinceVersion incremented; the SBE
+    blockLength prefix lets old readers truncate safely.
+  - The 8-byte SBE messageHeader precedes every body and maps onto the outer
+    frame as follows: messageHeader.blockLength/body length -> body_len;
+    templateId/schemaId/version are additionally echoed in the frame header's
+    schema_id/version space for demux without parsing the body.
+
+  Code generation (sbe_gen / official SBE toolchain for Java/C#/Go) is wired
+  in a later milestone; until then this IDL is normative and hand-kept views
+  must match it.
+-->
+<messageSchema package="brsk.msgx" id="1" version="0" semanticVersion="5.2"
+               byteOrder="littleEndian" description="brsk-msgx binary message bodies v1">
+
+  <types>
+    <!-- Standard SBE message header (8 bytes), precedes every message body. -->
+    <composite name="messageHeader" description="Message identifying header">
+      <type name="blockLength" primitiveType="uint16"/>
+      <type name="templateId" primitiveType="uint16"/>
+      <type name="schemaId" primitiveType="uint16"/>
+      <type name="version" primitiveType="uint16"/>
+    </composite>
+
+    <composite name="groupSizeEncoding" description="Repeating group dimensions">
+      <type name="blockLength" primitiveType="uint16"/>
+      <type name="numInGroup" primitiveType="uint16"/>
+    </composite>
+
+    <!-- Fixed-point money types. Scale is instrument metadata, not wire data. -->
+    <type name="Price" primitiveType="int64" description="Price in instrument price scale"/>
+    <type name="Qty"   primitiveType="int64" description="Quantity in instrument qty scale"/>
+    <type name="Money" primitiveType="int64" description="Amount in currency minor unit (cents)"/>
+
+    <type name="InstrumentId" primitiveType="uint32"/>
+    <type name="AccountId"    primitiveType="int64"/>
+    <type name="OrderId"      primitiveType="int64"/>
+    <type name="ExecId"       primitiveType="int64"/>
+    <type name="RejectCode"   primitiveType="int32"/>
+
+    <composite name="VarAscii" description="Variable length ASCII/UTF-8 string">
+      <type name="length" primitiveType="uint16"/>
+      <type name="varData" primitiveType="uint8" length="0" characterEncoding="UTF-8"/>
+    </composite>
+  </types>
+
+  <enums>
+    <enum name="Side" type="char" description="Order side">
+      <validValue name="Buy"  id="1">B</validValue>
+      <validValue name="Sell" id="2">S</validValue>
+    </enum>
+
+    <enum name="OrdType" type="char" description="Order price type">
+      <validValue name="Market" id="1">1</validValue>
+      <validValue name="Limit"  id="2">2</validValue>
+      <validValue name="Stop"   id="3">3</validValue>
+    </enum>
+
+    <enum name="TimeInForce" type="uint8" description="Order time in force">
+      <validValue name="Day"  id="0">0</validValue>
+      <validValue name="GTC"  id="1">1</validValue>
+      <validValue name="IOC"  id="3">3</validValue>
+      <validValue name="FOK"  id="4">4</validValue>
+      <validValue name="GTD"  id="6">6</validValue>
+    </enum>
+
+    <enum name="OrdStatus" type="char" description="Execution report status">
+      <validValue name="New"             id="0">0</validValue>
+      <validValue name="PartiallyFilled" id="1">1</validValue>
+      <validValue name="Filled"          id="2">2</validValue>
+      <validValue name="Canceled"        id="4">4</validValue>
+      <validValue name="Rejected"        id="8">8</validValue>
+      <validValue name="Expired"         id="C">C</validValue>
+    </enum>
+  </enums>
+
+  <!-- templateId 1: new order single. Fixed block = 40 bytes. -->
+  <message name="NewOrderSingle" id="1" blockLength="40"
+           description="New order (entry point for REQ/REP trading path)">
+    <field name="orderId"      id="1" type="OrderId"      offset="0"/>
+    <field name="accountId"    id="2" type="AccountId"    offset="8"/>
+    <field name="instrumentId" id="3" type="InstrumentId" offset="16"/>
+    <field name="side"         id="4" type="Side"         offset="20"/>
+    <field name="ordType"      id="5" type="OrdType"      offset="21"/>
+    <field name="timeInForce"  id="6" type="TimeInForce"  offset="22"/>
+    <field name="flags"        id="7" type="uint8"        offset="23"/>
+    <field name="price"        id="8" type="Price"        offset="24"/>
+    <field name="orderQty"     id="9" type="Qty"          offset="32"/>
+    <data  name="clOrdId"      id="100" type="VarAscii"
+           description="Client order tag, variable data after the fixed block"/>
+  </message>
+
+  <!-- templateId 2: cancel request. Fixed block = 24 bytes. -->
+  <message name="OrderCancelRequest" id="2" blockLength="24"
+           description="Cancel a working order">
+    <field name="orderId"      id="1" type="OrderId"      offset="0"/>
+    <field name="accountId"    id="2" type="AccountId"    offset="8"/>
+    <field name="instrumentId" id="3" type="InstrumentId" offset="16"/>
+    <field name="side"         id="4" type="Side"         offset="20"/>
+    <data  name="origClOrdId"  id="100" type="VarAscii"/>
+  </message>
+
+  <!-- templateId 3: execution report. Fixed block = 72 bytes. -->
+  <message name="ExecutionReport" id="3" blockLength="72"
+           description="Fill / state change report for an order">
+    <field name="orderId"      id="1"  type="OrderId"      offset="0"/>
+    <field name="execId"       id="2"  type="ExecId"       offset="8"/>
+    <field name="instrumentId" id="3"  type="InstrumentId" offset="16"/>
+    <field name="side"         id="4"  type="Side"         offset="20"/>
+    <field name="ordStatus"    id="5"  type="OrdStatus"    offset="21"/>
+    <field name="flags"        id="6"  type="uint8"        offset="22"/>
+    <field name="reserved"     id="7"  type="uint8"        offset="23"/>
+    <field name="lastQty"      id="8"  type="Qty"          offset="24"/>
+    <field name="lastPx"       id="9"  type="Price"        offset="32"/>
+    <field name="cumQty"       id="10" type="Qty"          offset="40"/>
+    <field name="avgPx"        id="11" type="Price"        offset="48"/>
+    <field name="rejectCode"   id="12" type="RejectCode"   offset="56"/>
+    <field name="transactTime" id="13" type="int64"        offset="64"
+           description="Exchange event time, UTC epoch micros"/>
+    <data  name="text"         id="100" type="VarAscii"
+           description="Reject / remark text"/>
+  </message>
+
+</messageSchema>

@@ -1,0 +1,14 @@
+[package]
+name = "msg-proto"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "msg_proto"
+path = "src/lib.rs"
+
+[dependencies]
+zerocopy = { version = "0.8", features = ["derive"] }
+# Pure-Rust CRC-32C (Castagnoli, CRC_32_ISCSI). A hardware-accelerated
+# implementation can replace this module later without touching callers.
+crc = "3"
